@@ -143,6 +143,70 @@
       }));
     });
 
+    // Inject File System Access API polyfill so pages using showOpenFilePicker,
+    // showSaveFilePicker, or showDirectoryPicker work inside the sandboxed iframe.
+    const polyfill = doc.createElement('script');
+    polyfill.textContent = `(function(){
+  function makeHandles(files){
+    return Array.from(files).map(function(f){
+      return { kind:'file', name:f.name, getFile:function(){ return Promise.resolve(f); } };
+    });
+  }
+  function buildAccept(types){
+    if(!types||!types.length) return '';
+    return types.flatMap(function(t){ return Object.values(t.accept||{}); }).flat().join(',');
+  }
+  function pickViaInput(opts){
+    return new Promise(function(resolve, reject){
+      var input = document.createElement('input');
+      input.type = 'file';
+      if(opts && opts.multiple) input.multiple = true;
+      var accept = buildAccept(opts && opts.types);
+      if(accept) input.accept = accept;
+      input.style.display = 'none';
+      document.body.appendChild(input);
+      input.addEventListener('change', function(){
+        document.body.removeChild(input);
+        if(!input.files || !input.files.length){
+          reject(new DOMException('The user aborted a request.','AbortError')); return;
+        }
+        resolve(makeHandles(input.files));
+      });
+      input.addEventListener('cancel', function(){
+        document.body.removeChild(input);
+        reject(new DOMException('The user aborted a request.','AbortError'));
+      });
+      input.click();
+    });
+  }
+  function dirPickViaInput(){
+    return new Promise(function(resolve, reject){
+      var input = document.createElement('input');
+      input.type = 'file';
+      input.webkitdirectory = true;
+      input.multiple = true;
+      input.style.display = 'none';
+      document.body.appendChild(input);
+      input.addEventListener('change', function(){
+        document.body.removeChild(input);
+        if(!input.files || !input.files.length){
+          reject(new DOMException('The user aborted a request.','AbortError')); return;
+        }
+        resolve({ kind:'directory', values: function(){ return makeHandles(input.files)[Symbol.iterator](); } });
+      });
+      input.addEventListener('cancel', function(){
+        document.body.removeChild(input);
+        reject(new DOMException('The user aborted a request.','AbortError'));
+      });
+      input.click();
+    });
+  }
+  if(!window.showOpenFilePicker)    window.showOpenFilePicker    = function(o){ return pickViaInput(o); };
+  if(!window.showSaveFilePicker)    window.showSaveFilePicker    = function(){ return Promise.reject(new DOMException('Not supported in viewer','NotSupportedError')); };
+  if(!window.showDirectoryPicker)   window.showDirectoryPicker   = function(){ return dirPickViaInput(); };
+})();`;
+    (doc.head || doc.documentElement).prepend(polyfill);
+
     return '<!DOCTYPE html>' + doc.documentElement.outerHTML;
   }
 
