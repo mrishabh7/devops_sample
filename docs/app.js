@@ -17,6 +17,7 @@
   /* ---- DOM refs ---- */
   const $ = id => document.getElementById(id);
   const fileInput      = $('fileInput');
+  const folderInput    = $('folderInput');
   const uploadSection  = $('uploadSection');
   const viewerSection  = $('viewerSection');
   const fileTabs       = $('fileTabs');
@@ -46,19 +47,30 @@
   function isImage(name) { return IMAGE_TYPES.includes(ext(name)); }
   function isHtml(name)  { return ['html','htm'].includes(ext(name)); }
 
+  // For folder picks, strip the root folder name so 'project/css/a.css' → 'css/a.css'
+  function getFileKey(file) {
+    const rel = file.webkitRelativePath;
+    if (rel) {
+      const slash = rel.indexOf('/');
+      return slash !== -1 ? rel.slice(slash + 1) : rel;
+    }
+    return file.name;
+  }
+
   /* ---- Read all selected files ---- */
   function readFiles(fileList) {
     const promises = Array.from(fileList).map(file => new Promise((resolve, reject) => {
+      const key = getFileKey(file);
       if (isText(file.name)) {
         const reader = new FileReader();
-        reader.onload  = e => resolve({ name: file.name, kind: 'text', content: e.target.result, mimeType: file.type });
+        reader.onload  = e => resolve({ name: key, kind: 'text', content: e.target.result, mimeType: file.type });
         reader.onerror = reject;
         reader.readAsText(file);
       } else {
         // Binary: create blob URL
         const url = URL.createObjectURL(file);
         state.blobUrls.push(url);
-        resolve({ name: file.name, kind: 'blob', url, mimeType: file.type });
+        resolve({ name: key, kind: 'blob', url, mimeType: file.type });
       }
     }));
 
@@ -175,7 +187,9 @@
     state.files.forEach((file, name) => {
       const btn = document.createElement('button');
       btn.className = 'file-tab' + (name === state.activeFile ? ' active' : '');
-      btn.innerHTML = `<span>${escapeHtml(name)}</span><span class="tab-ext">${ext(name)}</span>`;
+      const label = name.includes('/') ? name.split('/').pop() : name;
+      btn.title = name; // full path on hover
+      btn.innerHTML = `<span>${escapeHtml(label)}</span><span class="tab-ext">${ext(name)}</span>`;
       btn.addEventListener('click', () => {
         state.activeFile = name;
         renderTabs();
@@ -214,6 +228,7 @@
     previewFrame.srcdoc = '';
     fileTabs.innerHTML = '';
     fileInput.value = '';
+    folderInput.value = '';
     showUpload();
   }
 
@@ -263,7 +278,11 @@
   /* ---- Event listeners ---- */
   fileInput.addEventListener('change', e => {
     if (e.target.files.length) readFiles(e.target.files);
-    // Reset input so same files can be re-selected
+    e.target.value = '';
+  });
+
+  folderInput.addEventListener('change', e => {
+    if (e.target.files.length) readFiles(e.target.files);
     e.target.value = '';
   });
 
