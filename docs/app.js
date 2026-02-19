@@ -143,67 +143,39 @@
       }));
     });
 
-    // Inject File System Access API polyfill so pages using showOpenFilePicker,
-    // showSaveFilePicker, or showDirectoryPicker work inside the sandboxed iframe.
+    // Inject a postMessage-based polyfill for the File System Access API.
+    // Sandboxed iframes cannot trigger file inputs themselves, so the polyfill
+    // asks the outer viewer page to open the picker and transfers the bytes back.
     const polyfill = doc.createElement('script');
     polyfill.textContent = `(function(){
-  function makeHandles(files){
-    return Array.from(files).map(function(f){
-      return { kind:'file', name:f.name, getFile:function(){ return Promise.resolve(f); } };
-    });
-  }
   function buildAccept(types){
     if(!types||!types.length) return '';
     return types.flatMap(function(t){ return Object.values(t.accept||{}); }).flat().join(',');
   }
-  function pickViaInput(opts){
+  function request(accept, multiple, directory){
     return new Promise(function(resolve, reject){
-      var input = document.createElement('input');
-      input.type = 'file';
-      if(opts && opts.multiple) input.multiple = true;
-      var accept = buildAccept(opts && opts.types);
-      if(accept) input.accept = accept;
-      input.style.display = 'none';
-      document.body.appendChild(input);
-      input.addEventListener('change', function(){
-        document.body.removeChild(input);
-        if(!input.files || !input.files.length){
+      var id = Math.random().toString(36).slice(2);
+      function handler(e){
+        if(!e.data || e.data.__viewerFilePick !== id) return;
+        window.removeEventListener('message', handler);
+        if(e.data.aborted){
           reject(new DOMException('The user aborted a request.','AbortError')); return;
         }
-        resolve(makeHandles(input.files));
-      });
-      input.addEventListener('cancel', function(){
-        document.body.removeChild(input);
-        reject(new DOMException('The user aborted a request.','AbortError'));
-      });
-      input.click();
+        resolve(e.data.files.map(function(f){
+          return { kind:'file', name:f.name,
+            getFile:function(){ return Promise.resolve(new File([f.buffer], f.name, {type:f.type})); } };
+        }));
+      }
+      window.addEventListener('message', handler);
+      window.parent.postMessage({__viewerPickFile:id, accept:accept, multiple:!!multiple, directory:!!directory},'*');
     });
   }
-  function dirPickViaInput(){
-    return new Promise(function(resolve, reject){
-      var input = document.createElement('input');
-      input.type = 'file';
-      input.webkitdirectory = true;
-      input.multiple = true;
-      input.style.display = 'none';
-      document.body.appendChild(input);
-      input.addEventListener('change', function(){
-        document.body.removeChild(input);
-        if(!input.files || !input.files.length){
-          reject(new DOMException('The user aborted a request.','AbortError')); return;
-        }
-        resolve({ kind:'directory', values: function(){ return makeHandles(input.files)[Symbol.iterator](); } });
-      });
-      input.addEventListener('cancel', function(){
-        document.body.removeChild(input);
-        reject(new DOMException('The user aborted a request.','AbortError'));
-      });
-      input.click();
-    });
-  }
-  if(!window.showOpenFilePicker)    window.showOpenFilePicker    = function(o){ return pickViaInput(o); };
-  if(!window.showSaveFilePicker)    window.showSaveFilePicker    = function(){ return Promise.reject(new DOMException('Not supported in viewer','NotSupportedError')); };
-  if(!window.showDirectoryPicker)   window.showDirectoryPicker   = function(){ return dirPickViaInput(); };
+  if(!window.showOpenFilePicker)
+    window.showOpenFilePicker = function(o){ return request(buildAccept(o&&o.types), o&&o.multiple, false); };
+  if(!window.showDirectoryPicker)
+    window.showDirectoryPicker = function(){ return request('',true,true); };
+  if(!window.showSaveFilePicker)
+    window.showSaveFilePicker = function(){ return Promise.reject(new DOMException('Not supported in viewer','NotSupportedError')); };
 })();`;
     (doc.head || doc.documentElement).prepend(polyfill);
 
@@ -369,6 +341,47 @@
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') helpModal.classList.add('hidden');
     if ((e.ctrlKey || e.metaKey) && e.key === '\\') toggleMode();
+  });
+
+  /* ---- postMessage bridge: serve file-picker requests from the iframe ----
+     Sandboxed iframes cannot open file pickers directly. When the previewed
+     page calls showOpenFilePicker / showDirectoryPicker, the polyfill we
+     injected sends a message here. We open a real picker in the outer page,
+     read the chosen files as ArrayBuffers, and transfer them back.          */
+  window.addEventListener('message', e => {
+    if (!e.data || !e.data.__viewerPickFile) return;
+    const { __viewerPickFile: id, accept, multiple, directory } = e.data;
+
+    const input = document.createElement('input');
+    input.type = 'file';
+    if (multiple)  input.multiple = true;
+    if (directory) input.webkitdirectory = true;
+    if (accept && !directory) input.accept = accept;
+    input.style.display = 'none';
+    document.body.appendChild(input);
+
+    const reply = (payload, transfers) => {
+      document.body.removeChild(input);
+      if (previewFrame.contentWindow)
+        previewFrame.contentWindow.postMessage(payload, '*', transfers || []);
+    };
+
+    input.addEventListener('change', async () => {
+      if (!input.files || !input.files.length) {
+        reply({ __viewerFilePick: id, aborted: true });
+        return;
+      }
+      const transfers = [];
+      const files = await Promise.all(Array.from(input.files).map(async f => {
+        const buffer = await f.arrayBuffer();
+        transfers.push(buffer);
+        return { name: f.name, type: f.type, buffer };
+      }));
+      reply({ __viewerFilePick: id, files }, transfers);
+    });
+
+    input.addEventListener('cancel', () => reply({ __viewerFilePick: id, aborted: true }));
+    input.click();
   });
 
 })();
